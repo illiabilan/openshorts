@@ -111,7 +111,8 @@ def _get_whisper_model():
             from faster_whisper import WhisperModel
             _whisper_model = WhisperModel(key[0], device=key[1], compute_type=key[2])
             _whisper_key = key
-    return _whisper_model, cfg["device"]
+    actual_device = getattr(getattr(_whisper_model, "model", None), "device", cfg["device"])
+    return _whisper_model, actual_device
 
 
 def _run_whisper_once(media_path, **params):

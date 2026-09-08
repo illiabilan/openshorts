@@ -7,6 +7,7 @@ the logic stays unit-testable without the heavy video dependencies.
 
 # USD per 1M tokens (input, output incl. thinking), from ai.google.dev pricing.
 MODEL_PRICES = {
+    "gemini-3.6-flash": (0.75, 4.50),
     "gemini-3.5-flash": (1.50, 9.00),
     "gemini-3.1-flash-lite": (0.25, 1.50),
     "gemini-3-flash-preview": (0.50, 3.00),
@@ -168,11 +169,17 @@ def build_transcript_windows(transcript_result, video_duration,
             if segments[j][1] - w_start >= window_seconds:
                 break
         w_end = segments[j][1]
+        seg_slice = segments[i:j + 1]
+        timestamped_lines = [
+            f"[{round(s[0], 2):.2f}s -> {round(s[1], 2):.2f}s] {s[2]}"
+            for s in seg_slice
+        ]
         windows.append({
             "id": f"window_{window_index:03d}",
             "start": round(w_start, 3),
             "end": round(w_end, 3),
-            "text": " ".join(seg[2] for seg in segments[i:j + 1]),
+            "text": " ".join(seg[2] for seg in seg_slice),
+            "transcript": "\n".join(timestamped_lines),
         })
         window_index += 1
 
@@ -192,13 +199,14 @@ def build_transcript_windows(transcript_result, video_duration,
             "start": 0.0,
             "end": round(float(video_duration), 3),
             "text": str(transcript_result.get("text", "") or ""),
+            "transcript": str(transcript_result.get("text", "") or ""),
         })
     return windows
 
 
 def snap_clip_to_words(start, end, words, video_duration,
                        min_duration=15.0, max_duration=60.0,
-                       search_window=1.5, max_lead=0.35, max_tail=0.45):
+                       search_window=2.0, max_lead=0.35, max_tail=0.45):
     """
     Snap Gemini-proposed clip boundaries onto real word boundaries plus a bit
     of the surrounding silence. LLMs are bad at millisecond arithmetic; the

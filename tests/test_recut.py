@@ -169,6 +169,7 @@ class TestFfmpegCommands:
     def _stable_encode_args(self, monkeypatch):
         monkeypatch.setattr(recut, "video_encode_args", lambda tier: ["-c:v", "test"])
         monkeypatch.setattr(recut, "audio_encode_args", lambda: ["-c:a", "test"])
+        monkeypatch.setattr(recut, "vaapi_hwupload_arg", lambda: [])
 
     def test_cut_commands_shape(self):
         commands = recut.cut_commands("in.mp4", [_seg(10, 20), _seg(30, 35)],

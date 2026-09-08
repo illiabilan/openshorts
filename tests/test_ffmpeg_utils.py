@@ -55,6 +55,41 @@ def test_nvenc_mode_falls_back_to_x264_when_probe_fails(monkeypatch):
     assert video_encode_args(QUALITY)[:2] == ["-c:v", "libx264"]
 
 
+def test_vaapi_mode_uses_vaapi_when_probe_passes(monkeypatch):
+    monkeypatch.setenv("FFMPEG_ENCODER", "vaapi")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_vaapi", lambda device=None: True)
+    for tier in (QUALITY, QUALITY_FAST, DELIVERY):
+        args = video_encode_args(tier)
+        assert "-vaapi_device" in args
+        assert "-c:v" in args
+        idx = args.index("-c:v")
+        assert args[idx + 1] == "h264_vaapi"
+        assert "-qp" in args
+    assert ffmpeg_utils.is_vaapi_active() is True
+    assert ffmpeg_utils.vaapi_filter_suffix() == ",format=nv12,hwupload"
+    assert ffmpeg_utils.vaapi_hwupload_arg() == ["-vf", "format=nv12,hwupload"]
+
+
+def test_vaapi_mode_falls_back_to_x264_when_probe_fails(monkeypatch):
+    monkeypatch.setenv("FFMPEG_ENCODER", "vaapi")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_vaapi", lambda device=None: False)
+    assert video_encode_args(QUALITY)[:2] == ["-c:v", "libx264"]
+    assert ffmpeg_utils.is_vaapi_active() is False
+    assert ffmpeg_utils.vaapi_filter_suffix() == ""
+    assert ffmpeg_utils.vaapi_hwupload_arg() == []
+
+
+def test_auto_picks_vaapi_when_nvenc_fails_and_vaapi_passes(monkeypatch):
+    monkeypatch.setenv("FFMPEG_ENCODER", "auto")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_nvenc", lambda: False)
+    monkeypatch.setattr(ffmpeg_utils, "_probe_vaapi", lambda device=None: True)
+    assert ffmpeg_utils.is_vaapi_active() is True
+    args = video_encode_args(QUALITY)
+    assert "-c:v" in args
+    idx = args.index("-c:v")
+    assert args[idx + 1] == "h264_vaapi"
+
+
 def test_auto_probes_only_once(monkeypatch):
     calls = []
 

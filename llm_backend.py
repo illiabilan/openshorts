@@ -37,10 +37,12 @@ DEFAULT_TIMEOUT = 600.0  # local models on CPU are slow; a scoring batch can tak
 def provider() -> str:
     """``"openai"`` when a compatible endpoint is configured, else ``"gemini"``."""
     explicit = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
-    if explicit in ("openai", "ollama", "local", "openai-compatible"):
+    if explicit in ("openai", "ollama", "local", "openai-compatible", "openrouter", "fireworks", "groq", "custom"):
         return "openai"
     if explicit == "gemini":
         return "gemini"
+    if explicit == "anthropic":
+        return "anthropic"
     return "openai" if base_url() else "gemini"
 
 
@@ -163,3 +165,98 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
         "local": True,
     }
     return validated, cost
+
+
+PROVIDER_BASE_URLS = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "fireworks": "https://api.fireworks.ai/inference/v1",
+    "openai": "https://api.openai.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "ollama": "http://localhost:11434/v1",
+}
+
+
+def test_llm_connection(
+    provider_name: Optional[str] = None,
+    key: Optional[str] = None,
+    model: Optional[str] = None,
+    custom_base_url: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Test connectivity to the requested LLM provider without running a video job."""
+    prov = (provider_name or provider() or "gemini").strip().lower()
+
+    if prov == "gemini":
+        gemini_key = (key or os.environ.get("GEMINI_API_KEY") or os.environ.get("LLM_API_KEY") or "").strip()
+        if not gemini_key or gemini_key == "your_gemini_api_key_here":
+            return False, "API ключ для Google Gemini не вказано або він недійсний."
+        target_model = (model or os.environ.get("GEMINI_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.6-flash").strip()
+        try:
+            from google import genai
+            client = genai.Client(api_key=gemini_key)
+            resp = client.models.generate_content(
+                model=target_model,
+                contents="Ping. Respond with OK",
+            )
+            reply = (resp.text or "").strip()
+            return True, f"З'єднання з Gemini успішне! Модель: {target_model} (відповідь: {reply[:30]})"
+        except Exception as e:
+            return False, f"Помилка підключення до Gemini: {e}"
+
+    if prov == "anthropic":
+        ant_key = (key or os.environ.get("LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        if not ant_key:
+            return False, "API ключ для Anthropic не вказано."
+        target_model = (model or "claude-3-5-haiku-20241022").strip()
+        headers = {
+            "x-api-key": ant_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        body = {
+            "model": target_model,
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "Ping. Respond with OK"}],
+        }
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                res = client.post("https://api.anthropic.com/v1/messages", json=body, headers=headers)
+                if res.status_code == 200:
+                    return True, f"З'єднання з Anthropic успішне! Модель: {target_model}"
+                return False, f"Anthropic повернув код {res.status_code}: {res.text[:200]}"
+        except Exception as e:
+            return False, f"Помилка підключення до Anthropic: {e}"
+
+    # OpenAI-compatible providers: openrouter, fireworks, openai, groq, ollama, custom, etc.
+    url = (custom_base_url or os.environ.get("LLM_BASE_URL") or PROVIDER_BASE_URLS.get(prov) or "").strip().rstrip("/")
+    if not url:
+        url = "https://api.openai.com/v1" if prov == "openai" else "http://localhost:11434/v1"
+
+    api_key = (key or os.environ.get("LLM_API_KEY") or ("ollama" if prov == "ollama" else "")).strip()
+    if prov != "ollama" and not api_key:
+        return False, f"API ключ для {prov} не вказано."
+
+    target_model = (model or os.environ.get("LLM_MODEL") or ("llama3.1:8b" if prov == "ollama" else "gpt-4o-mini")).strip()
+    headers = {"Authorization": f"Bearer {api_key or 'ollama'}", "Content-Type": "application/json"}
+    if prov == "openrouter":
+        headers["HTTP-Referer"] = "https://openshorts.local"
+        headers["X-Title"] = "OpenShorts"
+
+    body = {
+        "model": target_model,
+        "messages": [{"role": "user", "content": "Ping. Respond with OK"}],
+        "max_tokens": 15,
+        "temperature": 0.1,
+    }
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            res = client.post(f"{url}/chat/completions", json=body, headers=headers)
+            if res.status_code == 200:
+                data = res.json()
+                choices = data.get("choices") or []
+                reply = choices[0].get("message", {}).get("content", "").strip() if choices else "OK"
+                return True, f"З'єднання з {prov} успішне! Модель {target_model} відповіла: {reply[:40]}"
+            return False, f"{prov} повернув код {res.status_code}: {res.text[:200]}"
+    except httpx.ConnectError:
+        return False, f"Не вдалося з'єднатися з сервером {url}. Перевірте чи він запущений."
+    except Exception as e:
+        return False, f"Помилка підключення до {prov}: {e}"

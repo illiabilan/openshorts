@@ -296,6 +296,19 @@ CLIP RULES:
   A brilliant moment that needs the previous five minutes is not a clip.
   Fix this by moving the START earlier, never by cutting the ending short: a
   clip that loses its payoff to gain context has traded down.
+- TIMESTAMPS FROM TRANSCRIPT (CRITICAL):
+  Candidate windows provide timestamped transcript lines in the format `[start -> end] text`.
+  Align your clip's `start` and `end` timestamps directly to these boundaries:
+  * Set `start` to the start timestamp of the opening sentence/segment.
+  * Set `end` to the END timestamp of the sentence that completes the thought or punchline.
+  Do not guess arbitrary fractional seconds in the middle of a sentence.
+- COMPLETE THOUGHT & STORY ARC (ABSOLUTE REQUIREMENT):
+  Every clip MUST contain a complete, self-contained thought, story, or argument with a clear beginning, middle, and natural conclusion/payoff.
+  NEVER cut off mid-thought, mid-sentence, mid-explanation, or on trailing conjunctions (e.g., "because...", "and so...", "but then...", "which means...").
+  The viewer MUST feel a clear sense of closure and completion.
+  If an interesting story or idea cannot be fully concluded within {max_secs:g} seconds, DO NOT truncate the ending! Instead:
+  1) Start at a later sentence closer to the punchline/conclusion, or
+  2) Skip this candidate in favor of a tighter, self-contained moment that finishes cleanly within {min_secs:g} to {max_secs:g} seconds.
 - HOW MANY: return {min_clips} to {max_clips} clips. Work through EVERY candidate
   window — they were already scored as the best moments in the video, so a window
   that yields nothing should be the exception, not the norm. Two or three clips

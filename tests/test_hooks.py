@@ -12,6 +12,8 @@ from hooks import (
     _split_emoji_runs,
     _EMOJI_RE,
     create_hook_image,
+    create_hook_intro_card,
+    add_hook_intro_to_video,
 )
 
 
@@ -124,3 +126,48 @@ class TestCreateHookImage:
         out = str(tmp_path / "hook_fallback.png")
         path, w, h = create_hook_image("Hola", 500, out, style="nope")
         assert os.path.exists(path) and w > 0 and h > 0
+
+
+class TestHookIntro:
+    def test_create_hook_intro_card(self, tmp_path):
+        import subprocess
+        # Generate a small 1-second dummy video
+        dummy_video = str(tmp_path / "dummy.mp4")
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=360x640:d=1",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "1",
+            "-c:v", "libx264", "-c:a", "aac", dummy_video
+        ], check=True, capture_output=True)
+
+        card_out = str(tmp_path / "intro_card.png")
+        path = create_hook_intro_card(
+            dummy_video, "Hook Test Title", card_out,
+            video_width=360, video_height=640, style="yellow"
+        )
+        assert os.path.exists(path)
+        img = Image.open(path)
+        assert img.size == (360, 640)
+
+    def test_add_hook_intro_to_video(self, tmp_path):
+        import subprocess
+        dummy_video = str(tmp_path / "dummy.mp4")
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=red:s=360x640:d=1",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "1",
+            "-c:v", "libx264", "-c:a", "aac", dummy_video
+        ], check=True, capture_output=True)
+
+        final_out = str(tmp_path / "dummy_with_intro.mp4")
+        success = add_hook_intro_to_video(
+            dummy_video, "Short Hook", final_out, duration=1.5, style="dark"
+        )
+        assert success is True
+        assert os.path.exists(final_out)
+
+        # Verify duration is approximately 1.0 + 1.5 = 2.5s
+        probe = subprocess.check_output([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "csv=p=0", final_out
+        ]).decode().strip()
+        dur = float(probe)
+        assert 2.3 <= dur <= 2.7

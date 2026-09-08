@@ -18,7 +18,8 @@ import json
 import time
 import subprocess
 
-from ffmpeg_utils import video_encode_args, DELIVERY, mark_ai_generated
+from ffmpeg_utils import (video_encode_args, DELIVERY, mark_ai_generated,
+                          vaapi_filter_suffix, is_vaapi_active)
 import httpx
 from urllib.parse import urljoin
 from typing import Optional, List, Dict, Callable
@@ -1017,11 +1018,11 @@ def generate_broll(
         "ffmpeg", "-y",
         "-loop", "1", "-i", img_path,          # Input 0: image
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",  # Input 1: silent audio
-        "-vf", zoompan_filter,
+        "-vf", zoompan_filter + vaapi_filter_suffix(),
         "-t", str(dur_secs),
         "-map", "0:v", "-map", "1:a",
         *video_encode_args(DELIVERY),
-        "-pix_fmt", "yuv420p",
+        *([] if is_vaapi_active() else ["-pix_fmt", "yuv420p"]),
         "-c:a", "aac", "-b:a", "128k",
         "-shortest",
         output_path,
@@ -1199,7 +1200,7 @@ def composite_video(
         cmd = [
             "ffmpeg", "-y",
             "-i", talking_head_path,
-            "-vf", sub_filter,
+            "-vf", sub_filter + vaapi_filter_suffix(),
             *video_encode_args(DELIVERY),
             "-c:a", "aac", "-b:a", "128k",
             output_path,
@@ -1283,6 +1284,9 @@ def composite_video(
     )
 
     filter_str = ";".join(filter_parts)
+
+    if is_vaapi_active():
+        filter_str = filter_str.replace("[finalv]", ",format=nv12,hwupload[finalv]")
 
     cmd = [
         "ffmpeg", "-y",

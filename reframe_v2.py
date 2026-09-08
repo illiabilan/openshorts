@@ -28,7 +28,7 @@ import screencast_layout
 import layout_ranges
 import split_layout
 from ffmpeg_utils import (video_encode_args, escape_filter_value, QUALITY_FAST,
-                          METADATA_SCRUB)
+                          METADATA_SCRUB, is_vaapi_active)
 
 ANALYSIS_MAX_WIDTH = 640
 
@@ -574,6 +574,9 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                     f"crop@c={init},"
                     f"scale={out_w}:{out_h},setsar=1[v]"
                 )
+
+            if is_vaapi_active():
+                graph = graph.replace("[v]", ",format=nv12,hwupload[v]")
 
             _run([
                 "ffmpeg", "-y", "-loglevel", "error",

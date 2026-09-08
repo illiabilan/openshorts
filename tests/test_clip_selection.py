@@ -54,6 +54,16 @@ class TestBuildTranscriptWindows:
         windows = build_transcript_windows(transcript, 500, window_seconds=90, overlap_seconds=30)
         assert len(windows) == 1
 
+    def test_windows_contain_timestamped_transcript(self):
+        transcript = {"segments": [
+            _seg(0.5, 12.3, "Hello world"),
+            _seg(12.5, 25.0, "Second phrase"),
+        ]}
+        windows = build_transcript_windows(transcript, 60, window_seconds=90, overlap_seconds=30)
+        assert "transcript" in windows[0]
+        assert "[0.50s -> 12.30s] Hello world" in windows[0]["transcript"]
+        assert "[12.50s -> 25.00s] Second phrase" in windows[0]["transcript"]
+
 
 class TestSnapClipToWords:
     def _words(self):

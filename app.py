@@ -2238,10 +2238,16 @@ async def process_endpoint(
     clip_min_seconds: Optional[str] = Form(None),
     clip_max_seconds: Optional[str] = Form(None),
     auto_hook: Optional[str] = Form(None),
+    auto_hook_mode: Optional[str] = Form(None),
+    auto_hook_seconds: Optional[str] = Form(None),
     auto_hook_style: Optional[str] = Form(None),
     thumbnail_session_id: Optional[str] = Form(None),
     captions: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
+    ffmpeg_encoder: Optional[str] = Form(None),
+    whisper_model: Optional[str] = Form(None),
+    whisper_device: Optional[str] = Form(None),
+    whisper_compute: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
@@ -2271,11 +2277,17 @@ async def process_endpoint(
         target_clips = body.get("target_clips")
         clip_min_seconds = body.get("clip_min_seconds")
         clip_max_seconds = body.get("clip_max_seconds")
-        auto_hook = body.get("auto_hook")
-        auto_hook_style = body.get("auto_hook_style")
+        auto_hook = body.get("auto_hook") or auto_hook
+        auto_hook_mode = body.get("auto_hook_mode") or auto_hook_mode
+        auto_hook_seconds = body.get("auto_hook_seconds") or auto_hook_seconds
+        auto_hook_style = body.get("auto_hook_style") or auto_hook_style
         thumbnail_session_id = body.get("thumbnail_session_id")
         captions = body.get("captions")
         upload_id = body.get("upload_id")
+        ffmpeg_encoder = body.get("ffmpeg_encoder") or ffmpeg_encoder
+        whisper_model = body.get("whisper_model") or whisper_model
+        whisper_device = body.get("whisper_device") or whisper_device
+        whisper_compute = body.get("whisper_compute") or whisper_compute
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -2374,7 +2386,19 @@ async def process_endpoint(
     # running this server. Every job then dies on `import cv2`. The quality
     # probe above already gets this right.
     cmd = [sys.executable, "-u", "main.py"] # -u for unbuffered
+    try:
+        load_dotenv(override=True)
+    except Exception:
+        pass
     env = os.environ.copy()
+    if ffmpeg_encoder:
+        env["FFMPEG_ENCODER"] = str(ffmpeg_encoder).strip()
+    if whisper_model:
+        env["WHISPER_MODEL"] = str(whisper_model).strip()
+    if whisper_device:
+        env["WHISPER_DEVICE"] = str(whisper_device).strip()
+    if whisper_compute:
+        env["WHISPER_COMPUTE"] = str(whisper_compute).strip()
     if not paid_allowed:
         # Daily paid-proxy budget hit: this job runs on the free routes only.
         env.pop("PROXY_URL", None)
@@ -2404,7 +2428,11 @@ async def process_endpoint(
         from hooks import HOOK_STYLES
         if auto_hook_style in HOOK_STYLES:
             env["AUTO_HOOK_STYLE"] = auto_hook_style
-        print(f"[auto-hook] job={job_id} style={env.get('AUTO_HOOK_STYLE', 'classic')}")
+        if auto_hook_mode:
+            env["AUTO_HOOK_MODE"] = str(auto_hook_mode).strip()
+        if auto_hook_seconds:
+            env["AUTO_HOOK_SECONDS"] = str(auto_hook_seconds).strip()
+        print(f"[auto-hook] job={job_id} mode={env.get('AUTO_HOOK_MODE', 'intro')} style={env.get('AUTO_HOOK_STYLE', 'classic')} secs={env.get('AUTO_HOOK_SECONDS', '1.8')}")
 
     # Manual generation controls (discussion #65): optional clip-count target
     # and duration band, forwarded to the selection prompts via the same env

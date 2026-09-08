@@ -9,7 +9,7 @@ from google.genai import types
 from pydantic import BaseModel
 
 from edit_builder import build_filter_string
-from ffmpeg_utils import video_encode_args, QUALITY, METADATA_SCRUB
+from ffmpeg_utils import video_encode_args, QUALITY, METADATA_SCRUB, vaapi_filter_suffix
 
 
 class EditDecision(BaseModel):
@@ -491,7 +491,7 @@ class VideoEditor:
         cmd = [
             'ffmpeg', '-y',
             '-i', input_path,
-            '-vf', filter_string,
+            '-vf', filter_string + vaapi_filter_suffix(),
             *video_encode_args(QUALITY),
             '-c:a', 'copy',
             *METADATA_SCRUB,

@@ -29,7 +29,8 @@ from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words,
                             trim_to_best)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
-                          QUALITY_FAST, METADATA_SCRUB)
+                          QUALITY_FAST, METADATA_SCRUB, vaapi_filter_suffix,
+                          vaapi_hwupload_arg)
 from dotenv import load_dotenv
 import json
 
@@ -1070,34 +1071,38 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
 def auto_hook_clip(clip_path, clip):
     """Burn the clip's Gemini hook text as a DERIVED file (AUTO_HOOK=1).
 
-    Writes ``hooked_<ts>_<clip filename>`` next to the canonical clip, exactly
-    like captions write ``subtitled_<ts>_...``: the canonical stays clean, so
-    the hook can later be replaced or removed by walking the prefix back
-    (app.py `_strip_burned_hook`). Captions are then burned ON TOP of the
-    hooked file, keeping the "captions are always the last layer" invariant.
+    Supports two modes via AUTO_HOOK_MODE:
+    - 'intro' (default / Option 2): creates a freeze-frame intro with blurred background
+      and hook text prepended before the main clip.
+    - 'overlay': overlays text on top of the running clip.
 
     Returns (hooked_path, hook_config), or None when skipped or failed — a
     hook problem must never cost the user the clip itself (same fail-open
     contract as auto_caption_clip)."""
-    text = (clip.get('viral_hook_text') or '').strip()
+    text = (clip.get('viral_hook_text') or clip.get('hook_text') or '').strip()
     if not text:
         return None
+    mode = os.environ.get("AUTO_HOOK_MODE", "intro").strip().lower()
     style = os.environ.get("AUTO_HOOK_STYLE", "classic")
+    default_secs = "1.8" if mode == "intro" else "5"
     try:
-        seconds = float(os.environ.get("AUTO_HOOK_SECONDS", "5"))
+        seconds = float(os.environ.get("AUTO_HOOK_SECONDS", default_secs))
     except ValueError:
-        seconds = 5.0
+        seconds = 1.8 if mode == "intro" else 5.0
     try:
-        from hooks import add_hook_to_video, HOOK_STYLES
+        from hooks import add_hook_intro_to_video, add_hook_to_video, HOOK_STYLES
         if style not in HOOK_STYLES:
             style = "classic"
         output_dir = os.path.dirname(clip_path)
         out_path = os.path.join(
             output_dir, f"hooked_{int(time.time())}_{os.path.basename(clip_path)}")
-        add_hook_to_video(clip_path, text, out_path, position="top",
-                          duration=seconds, style=style)
-        print(f"   🪝 Hook burned ({style}, {seconds:g}s): {text}")
-        return out_path, {"text": text, "style": style, "position": "top",
+        if mode == "intro":
+            add_hook_intro_to_video(clip_path, text, out_path, duration=seconds, style=style)
+        else:
+            add_hook_to_video(clip_path, text, out_path, position="top",
+                              duration=seconds, style=style)
+        print(f"   🪝 Hook applied ({mode}, {style}, {seconds:g}s): {text}")
+        return out_path, {"text": text, "style": style, "mode": mode,
                           "duration_seconds": seconds}
     except Exception as e:
         print(f"   ⚠️ Auto-hook failed ({type(e).__name__}: {e}) — "
@@ -1168,6 +1173,7 @@ def apply_watermark(video_path):
         f"[1:v]scale={wm_w}:-1,format=rgba,"
         f"colorchannelmixer=aa={WATERMARK_OPACITY}[wm];"
         f"[0:v][wm]overlay=x={x}:y={y}"
+        f"{vaapi_filter_suffix()}"
     )
     tmp_path = video_path + ".wm.mp4"
     cmd = ["ffmpeg", "-y", "-i", video_path, "-i", logo_path,
@@ -1272,6 +1278,7 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
          '-f', 'rawvideo', '-pix_fmt', 'bgr24',
          '-video_size', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
          '-framerate', str(fps), '-i', 'pipe:0',
+         *vaapi_hwupload_arg(),
          *video_encode_args(QUALITY_FAST), '-an', silent_video_path],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -1649,6 +1656,14 @@ def get_viral_clips(transcript_result, video_duration):
         # --- Pass 2: detailed clip extraction on the shortlist ---
         min_clips, max_clips = clip_count_targets(len(shortlist))
 
+        def _detail_payload(ws):
+            return [{
+                "id": w["id"],
+                "start": w["start"],
+                "end": w["end"],
+                "transcript": w.get("transcript", w.get("text", "")),
+            } for w in ws]
+
         def _detail_prompt(ws):
             # A split batch keeps the full clip-count band: a short list can
             # still hold the best clips, and the model returns fewer anyway.
@@ -1656,7 +1671,7 @@ def get_viral_clips(transcript_result, video_duration):
                 video_duration=video_duration, language=language,
                 min_clips=min_clips, max_clips=max_clips,
                 min_secs=min_secs, max_secs=max_secs,
-                windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False))
 
         shorts = _run_stage_split(client, model_name, shortlist, _detail_prompt,
                                   gemini_worker.DetailResponse, "shorts", costs, "detail")
@@ -2002,6 +2017,7 @@ if __name__ == '__main__':
                         '-ss', str(start),
                         '-to', str(end),
                         '-i', input_video,
+                        *vaapi_hwupload_arg(),
                         *video_encode_args(QUALITY_FAST),
                         *audio_encode_args(),
                         clip_temp_path
@@ -2027,25 +2043,28 @@ if __name__ == '__main__':
                     # and title from three of its frames BEFORE burning them.
                     if success and hook_grounding.wanted(clip['layout_ranges'], end - start):
                         hook_grounding.reground(clip_final_path, clip, transcript, start, end)
-                    if success and os.environ.get("AUTO_HOOK") == "1":
-                        hooked = auto_hook_clip(clip_final_path, clip)
-                        if hooked:
-                            deliver_path, clip['auto_hook'] = hooked
                     if success:
                         captioned = auto_caption_clip(
                             deliver_path, transcript, start, end,
                             split_ranges=_layouts.split_ranges(clip['layout_ranges']))
-                        print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
-                        # Hand the API the file to actually serve for this clip.
-                        # Without it the status poller guesses the clean reframe
-                        # name, so a job in flight showed every clip stripped of
-                        # its hook and captions until the WHOLE job finished and
-                        # the result got rebuilt through _canonical_clip_file.
-                        # Printed only after the full chain (reframe, watermark,
-                        # hook, captions) so the file is complete when it is
-                        # announced, never one that ffmpeg is still writing.
-                        print(f"CLIP_READY {i} "
-                              f"{os.path.basename(captioned or deliver_path)}")
+                        if captioned:
+                            deliver_path = captioned
+                    if success and os.environ.get("AUTO_HOOK") == "1":
+                        hooked = auto_hook_clip(deliver_path, clip)
+                        if hooked:
+                            deliver_path, clip['auto_hook'] = hooked
+                            captioned = deliver_path
+                    print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
+                    # Hand the API the file to actually serve for this clip.
+                    # Without it the status poller guesses the clean reframe
+                    # name, so a job in flight showed every clip stripped of
+                    # its hook and captions until the WHOLE job finished and
+                    # the result got rebuilt through _canonical_clip_file.
+                    # Printed only after the full chain (reframe, watermark,
+                    # hook, captions) so the file is complete when it is
+                    # announced, never one that ffmpeg is still writing.
+                    print(f"CLIP_READY {i} "
+                          f"{os.path.basename(captioned or deliver_path)}")
                     return success
                 finally:
                     if os.path.exists(clip_temp_path):

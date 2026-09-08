@@ -142,7 +142,18 @@ def audio_encode_args():
 
 _probe_lock = threading.Lock()
 _nvenc_ok = None  # None = not probed yet
+_vaapi_ok = None  # None = not probed yet
 _announced = False
+
+
+def _find_vaapi_device():
+    env_dev = os.environ.get("VAAPI_DEVICE")
+    if env_dev and os.path.exists(env_dev):
+        return env_dev
+    for candidate in ("/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/card0"):
+        if os.path.exists(candidate):
+            return candidate
+    return "/dev/dri/renderD128"
 
 
 def _probe_nvenc():
@@ -165,6 +176,28 @@ def _probe_nvenc():
         return False
 
 
+def _probe_vaapi(device=None):
+    """One tiny lavfi encode to prove h264_vaapi works on the VA-API render device."""
+    if device is None:
+        device = _find_vaapi_device()
+    if not os.path.exists(device):
+        return False
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-vaapi_device", device,
+        "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+        "-vf", "format=nv12,hwupload",
+        "-c:v", "h264_vaapi", "-f", "null", "-",
+    ]
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def nvenc_available():
     """Probe h264_nvenc once and cache the verdict (thread-safe)."""
     global _nvenc_ok
@@ -175,12 +208,65 @@ def nvenc_available():
     return _nvenc_ok
 
 
+def vaapi_available():
+    """Probe h264_vaapi once and cache the verdict (thread-safe)."""
+    global _vaapi_ok
+    if _vaapi_ok is None:
+        with _probe_lock:
+            if _vaapi_ok is None:
+                _vaapi_ok = _probe_vaapi()
+    return _vaapi_ok
+
+
 def reset_encoder_cache():
-    """Test hook: forget the cached probe result."""
-    global _nvenc_ok, _announced
+    """Test hook: forget cached probe results."""
+    global _nvenc_ok, _vaapi_ok, _announced
     with _probe_lock:
         _nvenc_ok = None
+        _vaapi_ok = None
         _announced = False
+
+
+def active_encoder():
+    """Return the active encoder name: 'h264_vaapi', 'h264_nvenc', or 'libx264'."""
+    mode = os.environ.get("FFMPEG_ENCODER", "x264").strip().lower()
+    if mode == "nvenc":
+        if nvenc_available():
+            return "h264_nvenc"
+        print("⚠️ [Encoder] FFMPEG_ENCODER=nvenc but h264_nvenc is not usable here — falling back to libx264")
+        return "libx264"
+    if mode == "vaapi":
+        if vaapi_available():
+            return "h264_vaapi"
+        print("⚠️ [Encoder] FFMPEG_ENCODER=vaapi but h264_vaapi is not usable here — falling back to libx264")
+        return "libx264"
+    if mode == "auto":
+        if nvenc_available():
+            return "h264_nvenc"
+        if vaapi_available():
+            return "h264_vaapi"
+        return "libx264"
+    return "libx264"
+
+
+def is_vaapi_active():
+    """Return True if the current active encoder is h264_vaapi."""
+    return active_encoder() == "h264_vaapi"
+
+
+def is_nvenc_active():
+    """Return True if the current active encoder is h264_nvenc."""
+    return active_encoder() == "h264_nvenc"
+
+
+def vaapi_filter_suffix():
+    """Return ',format=nv12,hwupload' when VA-API is active, else empty string."""
+    return ",format=nv12,hwupload" if is_vaapi_active() else ""
+
+
+def vaapi_hwupload_arg():
+    """Return ['-vf', 'format=nv12,hwupload'] when VA-API is active, else empty list."""
+    return ["-vf", "format=nv12,hwupload"] if is_vaapi_active() else []
 
 
 def video_encode_args(tier=QUALITY):
@@ -190,19 +276,20 @@ def video_encode_args(tier=QUALITY):
         raise ValueError(f"Unknown encode tier: {tier!r}")
 
     mode = os.environ.get("FFMPEG_ENCODER", "x264").strip().lower()
-    use_nvenc = False
-    if mode in ("nvenc", "auto"):
-        use_nvenc = nvenc_available()
-        if mode == "nvenc" and not use_nvenc:
-            print("⚠️ [Encoder] FFMPEG_ENCODER=nvenc but h264_nvenc is not "
-                  "usable here — falling back to libx264")
+    encoder = active_encoder()
 
     if not _announced:
         _announced = True
-        print(f"🎞️ [Encoder] video encoder: {'h264_nvenc' if use_nvenc else 'libx264'} "
-              f"(FFMPEG_ENCODER={mode})")
+        print(f"🎞️ [Encoder] video encoder: {encoder} (FFMPEG_ENCODER={mode})")
 
-    return list((_NVENC_ARGS if use_nvenc else _X264_ARGS)[tier])
+    if encoder == "h264_vaapi":
+        device = _find_vaapi_device()
+        qp = "20" if tier in (QUALITY, QUALITY_FAST) else "24"
+        return ["-vaapi_device", device, "-c:v", "h264_vaapi", "-qp", qp]
+    elif encoder == "h264_nvenc":
+        return list(_NVENC_ARGS[tier])
+    else:
+        return list(_X264_ARGS[tier])
 
 
 def escape_filter_value(value):

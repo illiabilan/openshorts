@@ -6,7 +6,7 @@ import urllib.request
 import uuid
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-from ffmpeg_utils import video_encode_args, QUALITY, METADATA_SCRUB
+from ffmpeg_utils import video_encode_args, QUALITY, METADATA_SCRUB, vaapi_filter_suffix, is_vaapi_active
 
 
 def _truncate_bytes(text, max_bytes):
@@ -429,7 +429,8 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
             '-i', video_path,
             '-i', img_path,
             '-filter_complex', f"[0:v][1:v]overlay={overlay_x}:{overlay_y}"
-                + (f":enable='between(t,0,{float(duration)})'" if duration else ""),
+                + (f":enable='between(t,0,{float(duration)})'" if duration else "")
+                + vaapi_filter_suffix(),
             '-c:a', 'copy',
             *video_encode_args(QUALITY),
             *METADATA_SCRUB,
@@ -454,3 +455,167 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
         # Cleanup temp image
         if os.path.exists(hook_filename):
             os.remove(hook_filename)
+
+
+def create_hook_intro_card(
+    video_path,
+    text,
+    output_image_path,
+    video_width=1080,
+    video_height=1920,
+    style="classic",
+    font_scale=1.15,
+    blur_radius=30,
+    darken_alpha=110
+):
+    """
+    Extracts the first frame of the video, applies heavy Gaussian blur + darkening,
+    and composites the formatted hook text centered on the screen (Option 2).
+    """
+    download_font_if_needed()
+
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+    uid = uuid.uuid4().hex[:8]
+    temp_frame_path = f"temp_frame_{uid}_{_truncate_bytes(stem, 60)}.jpg"
+    temp_hook_path = f"temp_hook_{uid}_{_truncate_bytes(stem, 60)}.png"
+
+    try:
+        # 1. Extract first frame
+        cmd = [
+            "ffmpeg", "-y", "-ss", "0.05", "-i", video_path,
+            "-vframes", "1", "-q:v", "2", temp_frame_path
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+
+        # 2. Resize frame to video dimensions
+        frame = Image.open(temp_frame_path).convert("RGBA")
+        if frame.size != (video_width, video_height):
+            frame = frame.resize((video_width, video_height), Image.Resampling.LANCZOS)
+
+        # 3. Apply strong Gaussian blur for background
+        blurred_bg = frame.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+        # 4. Apply semi-transparent darkening
+        if darken_alpha > 0:
+            dark_overlay = Image.new("RGBA", (video_width, video_height), (0, 0, 0, darken_alpha))
+            blurred_bg.paste(dark_overlay, (0, 0), dark_overlay)
+
+        # 5. Render hook text
+        target_box_width = int(video_width * 0.88)
+        img_path, box_w, box_h = create_hook_image(
+            text, target_box_width, output_image_path=temp_hook_path, font_scale=font_scale, style=style
+        )
+        hook_img = Image.open(temp_hook_path).convert("RGBA")
+
+        # 6. Composite in upper-center (golden ratio ~40% from top)
+        pos_x = (video_width - box_w) // 2
+        pos_y = int(video_height * 0.40) - (box_h // 2)
+        blurred_bg.paste(hook_img, (pos_x, pos_y), hook_img)
+
+        blurred_bg.save(output_image_path)
+        return output_image_path
+    finally:
+        if os.path.exists(temp_frame_path):
+            try:
+                os.remove(temp_frame_path)
+            except OSError:
+                pass
+        if os.path.exists(temp_hook_path):
+            try:
+                os.remove(temp_hook_path)
+            except OSError:
+                pass
+
+
+def add_hook_intro_to_video(
+    video_path,
+    text,
+    output_path,
+    duration=1.8,
+    style="classic",
+    font_scale=1.15,
+    blur_radius=30,
+    darken_alpha=110
+):
+    """
+    Creates a freeze-frame intro with blurred background and hook text,
+    prepended before the main video (Option 2).
+    """
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video {video_path} not found")
+
+    # 1. Probe video width, height, fps
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+               '-show_entries', 'stream=width,height,r_frame_rate',
+               '-of', 'csv=s=x:p=0', video_path]
+        res = subprocess.check_output(cmd, timeout=60).decode().strip()
+        dims = res.split('\n')[0].split('x')
+        video_width = int(dims[0])
+        video_height = int(dims[1])
+        fps = dims[2].strip() if len(dims) > 2 else "30"
+    except Exception as e:
+        print(f"⚠️ FFprobe failed: {e}. Assuming 1080x1920 30fps")
+        video_width = 1080
+        video_height = 1920
+        fps = "30"
+
+    # 2. Generate the blurred intro card
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+    uid = uuid.uuid4().hex[:8]
+    intro_card_path = f"temp_intro_card_{uid}_{_truncate_bytes(stem, 60)}.png"
+
+    try:
+        create_hook_intro_card(
+            video_path=video_path,
+            text=text,
+            output_image_path=intro_card_path,
+            video_width=video_width,
+            video_height=video_height,
+            style=style,
+            font_scale=font_scale,
+            blur_radius=blur_radius,
+            darken_alpha=darken_alpha
+        )
+
+        # 3. Assemble with FFmpeg (hardware accelerated when available)
+        va_upload = ",format=nv12,hwupload" if is_vaapi_active() else ""
+        dur_str = f"{float(duration):.2f}"
+
+        filter_complex = (
+            f"[0:v]scale={video_width}:{video_height},setsar=1,fps={fps},format=nv12[v0];"
+            f"[1:v]scale={video_width}:{video_height},setsar=1,fps={fps},format=nv12[v1];"
+            f"[v0][v1]concat=n=2:v=1:a=0{va_upload}[outv];"
+            f"[2:a]aformat=sample_rates=44100:channel_layouts=stereo[a0];"
+            f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo[a1];"
+            f"[a0][a1]concat=n=2:v=0:a=1[outa]"
+        )
+
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-loop', '1', '-t', dur_str, '-i', intro_card_path,
+            '-i', video_path,
+            '-f', 'lavfi', '-t', dur_str, '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+            '-filter_complex', filter_complex,
+            '-map', '[outv]', '-map', '[outa]',
+            *video_encode_args(QUALITY),
+            *METADATA_SCRUB,
+            '-movflags', '+faststart',
+            output_path
+        ]
+
+        print(f"🎬 Prepending Hook Intro ({dur_str}s, style={style}): '{text}'")
+        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+        print(f"✅ Hook Intro added to {output_path}")
+        return True
+
+    except subprocess.CalledProcessError as e:
+        err_msg = e.stderr.decode() if e.stderr else 'Unknown'
+        print(f"❌ FFmpeg Hook Intro Error: {err_msg}")
+        raise RuntimeError(f"FFmpeg Hook Intro failed: {err_msg}")
+    finally:
+        if os.path.exists(intro_card_path):
+            try:
+                os.remove(intro_card_path)
+            except OSError:
+                pass

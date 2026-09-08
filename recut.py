@@ -25,7 +25,7 @@ import time
 import uuid
 
 from ffmpeg_utils import (METADATA_SCRUB, QUALITY_FAST, audio_encode_args,
-                          video_encode_args)
+                          video_encode_args, vaapi_hwupload_arg)
 
 # EDL limits. Deliberately generous — the editor is for humans fixing cuts,
 # not for stitching feature films.
@@ -190,6 +190,7 @@ def cut_commands(input_path, segments, part_paths):
             "-ss", str(seg["start"]),
             "-to", str(seg["end"]),
             "-i", input_path,
+            *vaapi_hwupload_arg(),
             *video_encode_args(QUALITY_FAST),
             *audio_encode_args(),
             # Every final-artifact producer in the repo scrubs source metadata

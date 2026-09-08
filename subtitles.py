@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 from ffmpeg_utils import (video_encode_args, escape_filter_value, QUALITY,
-                          METADATA_SCRUB)
+                          METADATA_SCRUB, vaapi_filter_suffix)
 
 
 _STDIO_CONFIGURED = False
@@ -560,6 +560,8 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
     else:
         vf = (f"subtitles=filename='{safe_srt_path}':fontsdir='{safe_fonts_dir}'"
               f":charenc=UTF-8:force_style='{style_string}'")
+
+    vf += vaapi_filter_suffix()
 
     cmd = [
         'ffmpeg', '-y',
